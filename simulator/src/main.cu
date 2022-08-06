@@ -16,6 +16,70 @@
 					  auto elapse_##a = std::chrono::duration_cast<std::chrono::nanoseconds>(time_end_##a - time_begin_##a);\
                       printf("[%s time measured : %.6f s == %.4f ms == %.2f us]\n", #a, elapse_##a.count() * 1e-9, elapse_##a.count() * 1e-6, elapse_##a.count() * 1e-3)
 
+//#define CTIME_ENABLE
+#ifdef CTIME_ENABLE
+    #define CTIME_BEGIN(a) a.begin()
+    #define CTIME_END(a) a.end()
+#else
+    #define CTIME_BEGIN(a)
+    #define CTIME_END(a)
+#endif
+
+namespace Timer
+{
+    class Cumulative_Timer
+    {
+        enum class TimeUnit
+        {
+            s = 0,
+            ms,
+            us,
+            ns
+        };
+        public:
+        Cumulative_Timer(std::string _name, TimeUnit _unit = TimeUnit::ms) : name(_name), unit(_unit)
+        {
+            reset();
+        }
+        void reset()
+        {
+            cumulative_time = 0.0f;
+        }
+        void begin()
+        {
+            time1 = std::chrono::high_resolution_clock::now();
+        }
+        float end()
+        {
+            cudaDeviceSynchronize();
+            auto time2 = std::chrono::high_resolution_clock::now();
+            auto dur = std::chrono::duration_cast<std::chrono::nanoseconds>(time2 - time1);
+            float duration_time = dur.count() * powf(0.1, 3 * (3 - (int)unit));
+            cumulative_time += duration_time;
+            return duration_time;
+        }
+        void show()
+        {
+            std::string unit_name = "";
+            if(unit == TimeUnit::s) unit_name = "s";
+            else if(unit == TimeUnit::ms) unit_name = "ms";
+            else if(unit == TimeUnit::us) unit_name = "us";
+            else if(unit == TimeUnit::ns) unit_name = "ns";
+            printf("[%s used cumulative time = %.4f %s]\n", name.c_str(), cumulative_time, unit_name.c_str());
+        }
+        float get()
+        {
+            return cumulative_time;
+        }
+        private:
+        std::string name;
+        decltype(std::chrono::high_resolution_clock::now()) time1;
+        float cumulative_time;
+        TimeUnit unit;
+    };
+}
+
+
 #define SWE_dx 1
 #define SWE_dy SWE_dx
 #define dt_max 0.1
@@ -29,8 +93,8 @@
 #define SWE_omega 15
 #define dt dt_max
 
-#define SWE_eta_water 0.00  //0.005
-#define SWE_eta_water_const 0.0 //0.1
+#define SWE_eta_water 0.005  //0.005
+#define SWE_eta_water_const 0.1 //0.1
 #define SWE_EVAP_FREE 0.0003
 #define SWE_EVAP_DAMP 0.00000015
 
@@ -49,7 +113,7 @@
 #define DAMP 2
 #define FREE 3
 
-#define SAVE_SIMD 0
+#define SAVE_SIMD 1
 
 struct BGRu8
 {
@@ -269,7 +333,7 @@ int main(int argc, char* argv[])
     {
         for(int i = 0; i < width; i++)
         {
-            if(powf(j - height / 2, 2) + powf(i - width / 2, 2) <= 300*300)
+            if(powf(j - height / 2, 2) + powf(i - width / 2, 2) <= 800*800)
             {
                 h_cpu[j * width + i] = WATER_H;
                 cell_cpu[j * width + i] = WATER;
@@ -362,6 +426,12 @@ int main(int argc, char* argv[])
     delete[] debug_cpu;
     delete[] water_region_flag_cpu;*/
 
+    Timer::Cumulative_Timer ctime_h("update H");
+    Timer::Cumulative_Timer ctime_uv("update UV");
+    Timer::Cumulative_Timer ctime_evap("evaporation");
+    Timer::Cumulative_Timer ctime_save("save t-1");
+    Timer::Cumulative_Timer ctime_cell("update cells");
+
     int t = 0;
     std::cout<<"simulation start"<<std::endl;
     TIME_BEGIN(simulation);
@@ -370,7 +440,7 @@ int main(int argc, char* argv[])
         //BGRu8* debug;
         //cudaMalloc((void**)&debug, height * width * sizeof(BGRu8));
         //cudaMemset(debug, 0, height * width * sizeof(BGRu8));
-
+        CTIME_BEGIN(ctime_h);
         UpdateH<<<swe_block_num, swe_block_size>>>(
             height,
             width,
@@ -384,7 +454,9 @@ int main(int argc, char* argv[])
             v_old,
             cell
         );
+        CTIME_END(ctime_h);
         //cudaMemcpy(s_temp, s, height * width * sizeof(float), cudaMemcpyDeviceToDevice);
+        CTIME_BEGIN(ctime_uv);
         UpdateUV<<<swe_block_num, swe_block_size>>>(
             height,
             width,
@@ -401,7 +473,9 @@ int main(int argc, char* argv[])
             s_temp,
             z
         );
+        CTIME_END(ctime_uv);
 
+        CTIME_BEGIN(ctime_evap);
         EvaporateY<<<evap_grid_size, evap_block_size>>>(
             height,
             width,
@@ -419,11 +493,13 @@ int main(int argc, char* argv[])
             evap1,
             water_region_flag
         );
+        CTIME_END(ctime_evap);
 
         //cudaMemcpy(h_old, h_new, height * width * sizeof(float), cudaMemcpyDeviceToDevice);
         //cudaMemcpy(u_old, u_new, height * (width + 1) * sizeof(float), cudaMemcpyDeviceToDevice);
         //cudaMemcpy(v_old, v_new, (height + 1) * width * sizeof(float), cudaMemcpyDeviceToDevice);
 
+        CTIME_BEGIN(ctime_save);
         Save<<<save_block_num, SAVE_BLOCK_SIZE>>>(
             height, 
             width,
@@ -436,7 +512,9 @@ int main(int argc, char* argv[])
             s,
             s_temp
         );
+        CTIME_END(ctime_save);
 
+        CTIME_BEGIN(ctime_cell);
         UpdateCell<<<evap_grid_size, evap_block_size>>>(
             height,
             width,
@@ -445,6 +523,7 @@ int main(int argc, char* argv[])
             cell,
             water_region_flag
         );
+        CTIME_END(ctime_cell);
 
         //BGRu8* debug_cpu = new BGRu8[width * height];
         //cudaMemcpy(debug_cpu, debug, height * width * sizeof(BGRu8), cudaMemcpyDeviceToHost);
@@ -500,6 +579,12 @@ int main(int argc, char* argv[])
         }
     }
     SAVE("cell_end", cell_end);
+
+    ctime_h.show();
+    ctime_uv.show();
+    ctime_evap.show();
+    ctime_save.show();
+    ctime_cell.show();
 
     cudaFree(h_new);
     cudaFree(h_old);
@@ -841,7 +926,6 @@ __global__ void EvaporateXAbsorb(
                       evap1[threadIdx.y + 4][threadIdx.x + 4 + 4] * 0.1109038212717001f;
     evap_this = (1 - evap_this) * water_region_flag[pixel_idx];
     evap_this = h_new[pixel_idx] * SWE_eta_water * (evap_this * (1 - SWE_eta_water_const) + SWE_eta_water_const);
-    evap_this = 0;//!!!!!!!
     unsigned char this_cell = cell[pixel_idx];
     if(this_cell == WATER)
     {
