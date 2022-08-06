@@ -1,0 +1,58 @@
+Performing C++ SOURCE FILE Test CMAKE_HAVE_LIBC_PTHREAD failed with the following output:
+Change Dir: /home/jiamian/watercolorization_v3/simulator/v2_opt_4/GPU/simulator/build/CMakeFiles/CMakeTmp
+
+Run Build Command(s):/usr/bin/make cmTC_4ffd8/fast && /usr/bin/make -f CMakeFiles/cmTC_4ffd8.dir/build.make CMakeFiles/cmTC_4ffd8.dir/build
+make[1]: ディレクトリ '/home/jiamian/watercolorization_v3/simulator/v2_opt_4/GPU/simulator/build/CMakeFiles/CMakeTmp' に入ります
+Building CXX object CMakeFiles/cmTC_4ffd8.dir/src.cxx.o
+/usr/bin/c++    -std=c++11 -DCMAKE_HAVE_LIBC_PTHREAD   -o CMakeFiles/cmTC_4ffd8.dir/src.cxx.o -c /home/jiamian/watercolorization_v3/simulator/v2_opt_4/GPU/simulator/build/CMakeFiles/CMakeTmp/src.cxx
+Linking CXX executable cmTC_4ffd8
+/usr/bin/cmake -E cmake_link_script CMakeFiles/cmTC_4ffd8.dir/link.txt --verbose=1
+/usr/bin/c++   -std=c++11 -DCMAKE_HAVE_LIBC_PTHREAD    CMakeFiles/cmTC_4ffd8.dir/src.cxx.o  -o cmTC_4ffd8 
+/usr/bin/ld: CMakeFiles/cmTC_4ffd8.dir/src.cxx.o: in function `main':
+src.cxx:(.text+0x46): undefined reference to `pthread_create'
+/usr/bin/ld: src.cxx:(.text+0x52): undefined reference to `pthread_detach'
+/usr/bin/ld: src.cxx:(.text+0x63): undefined reference to `pthread_join'
+collect2: error: ld returned 1 exit status
+make[1]: *** [CMakeFiles/cmTC_4ffd8.dir/build.make:87: cmTC_4ffd8] エラー 1
+make[1]: ディレクトリ '/home/jiamian/watercolorization_v3/simulator/v2_opt_4/GPU/simulator/build/CMakeFiles/CMakeTmp' から出ます
+make: *** [Makefile:121: cmTC_4ffd8/fast] エラー 2
+
+
+Source file was:
+#include <pthread.h>
+
+void* test_func(void* data)
+{
+  return data;
+}
+
+int main(void)
+{
+  pthread_t thread;
+  pthread_create(&thread, NULL, test_func, NULL);
+  pthread_detach(thread);
+  pthread_join(thread, NULL);
+  pthread_atfork(NULL, NULL, NULL);
+  pthread_exit(NULL);
+
+  return 0;
+}
+
+Determining if the function pthread_create exists in the pthreads failed with the following output:
+Change Dir: /home/jiamian/watercolorization_v3/simulator/v2_opt_4/GPU/simulator/build/CMakeFiles/CMakeTmp
+
+Run Build Command(s):/usr/bin/make cmTC_7419c/fast && /usr/bin/make -f CMakeFiles/cmTC_7419c.dir/build.make CMakeFiles/cmTC_7419c.dir/build
+make[1]: ディレクトリ '/home/jiamian/watercolorization_v3/simulator/v2_opt_4/GPU/simulator/build/CMakeFiles/CMakeTmp' に入ります
+Building CXX object CMakeFiles/cmTC_7419c.dir/CheckFunctionExists.cxx.o
+/usr/bin/c++    -std=c++11 -DCHECK_FUNCTION_EXISTS=pthread_create   -o CMakeFiles/cmTC_7419c.dir/CheckFunctionExists.cxx.o -c /home/jiamian/watercolorization_v3/simulator/v2_opt_4/GPU/simulator/build/CMakeFiles/CheckLibraryExists/CheckFunctionExists.cxx
+Linking CXX executable cmTC_7419c
+/usr/bin/cmake -E cmake_link_script CMakeFiles/cmTC_7419c.dir/link.txt --verbose=1
+/usr/bin/c++   -std=c++11 -DCHECK_FUNCTION_EXISTS=pthread_create    CMakeFiles/cmTC_7419c.dir/CheckFunctionExists.cxx.o  -o cmTC_7419c  -lpthreads 
+/usr/bin/ld: -lpthreads が見つかりません
+collect2: error: ld returned 1 exit status
+make[1]: *** [CMakeFiles/cmTC_7419c.dir/build.make:87: cmTC_7419c] エラー 1
+make[1]: ディレクトリ '/home/jiamian/watercolorization_v3/simulator/v2_opt_4/GPU/simulator/build/CMakeFiles/CMakeTmp' から出ます
+make: *** [Makefile:121: cmTC_7419c/fast] エラー 2
+
+
+
