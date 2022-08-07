@@ -16,7 +16,7 @@
 					  auto elapse_##a = std::chrono::duration_cast<std::chrono::nanoseconds>(time_end_##a - time_begin_##a);\
                       printf("[%s time measured : %.6f s == %.4f ms == %.2f us]\n", #a, elapse_##a.count() * 1e-9, elapse_##a.count() * 1e-6, elapse_##a.count() * 1e-3)
 
-//#define CTIME_ENABLE
+#define CTIME_ENABLE
 #ifdef CTIME_ENABLE
     #define CTIME_BEGIN(a) a.begin()
     #define CTIME_END(a) a.end()
@@ -234,11 +234,11 @@ __global__ void UpdateCell(
 #define SWE_BLOCK_WIDTH 32
 #define SWE_BLOCK_HEIGHT 16
 
-#define SAVE_BLOCK_SIZE (32 * 32)
+#define SAVE_BLOCK_SIZE (32 * 8)
 #define SAVE_BLOCK_NUM -1
 
 #define EVAP_BLOCK_WIDTH 32
-#define EVAP_BLOCK_HEIGHT 32
+#define EVAP_BLOCK_HEIGHT 16
 
 
 int main(int argc, char* argv[])
@@ -529,7 +529,6 @@ int main(int argc, char* argv[])
         //cudaMemcpy(debug_cpu, debug, height * width * sizeof(BGRu8), cudaMemcpyDeviceToHost);
         //cv::Mat debug_mat = cv::Mat(cv::Size(width, height), CV_8UC3, (unsigned char*)debug_cpu);
         //SAVE("debug", debug_mat);
-        
 
         t++;
     }
