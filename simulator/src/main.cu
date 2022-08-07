@@ -2,6 +2,7 @@
 #include "cmdline.h"
 #include <omp.h>
 #include <chrono>
+#include <cuda_fp16.h>
 
 //#define MAX(a,b) ((a) > (b) ? (a) : (b))
 //#define MIN(a,b) ((a) < (b) ? (a) : (b))
@@ -9,6 +10,17 @@
 #define PAPER_HEIGHT_PATH "/home/jiamian/img/paper/paper_4k_test5.png"
 #define PAPER_IMAGE_PATH  "/home/jiamian/img/paper/paper_4k_test5_rendered_modified_2.png"
 #define paper_scale 0.37
+
+#define CHECK_CUDA_ERR_MODE
+#ifdef CHECK_CUDA_ERR_MODE
+#define CHECK_CUDA_ERR(a) cudaError_t cuda_err_##a = cudaGetLastError();\
+						  if (cuda_err_##a != cudaSuccess){\
+                              printf("CUDA Error at %s : %s\n", #a, cudaGetErrorString(cuda_err_##a));\
+							  exit(-1);\
+						  }
+#elif
+#define CHECK_CUDA_ERR(a)
+#endif // CHECK_CUDA_ERR_MODE
 
 #define TIME_BEGIN(a) auto time_begin_##a = std::chrono::high_resolution_clock::now()
 
@@ -60,12 +72,14 @@ namespace Timer
         }
         void show()
         {
+            #ifdef CTIME_ENABLE
             std::string unit_name = "";
             if(unit == TimeUnit::s) unit_name = "s";
             else if(unit == TimeUnit::ms) unit_name = "ms";
             else if(unit == TimeUnit::us) unit_name = "us";
             else if(unit == TimeUnit::ns) unit_name = "ns";
             printf("[%s used cumulative time = %.4f %s]\n", name.c_str(), cumulative_time, unit_name.c_str());
+            #endif
         }
         float get()
         {
@@ -122,6 +136,10 @@ struct BGRu8
     unsigned char r;
 };
 
+struct PigCell
+{
+    float w[5];
+};
 
 #define SAVE(path, img) cv::imwrite(std::string("../output/") + path + ".png", img)
 #define DEFAULT_COLOR 255
@@ -229,6 +247,17 @@ __global__ void UpdateCell(
     unsigned char* water_region_flag
 );
 
+__global__ void UpdatePigment(
+    int height,
+    int width,
+    float* u_new,
+    float* v_new,
+    float* gks,
+    float* dks,
+    unsigned char* cell,
+    float* z
+);
+
 #define SWE_TANK_WIDTH 32
 #define SWE_TANK_HEIGHT 64
 #define SWE_BLOCK_WIDTH 32
@@ -239,6 +268,10 @@ __global__ void UpdateCell(
 
 #define EVAP_BLOCK_WIDTH 32
 #define EVAP_BLOCK_HEIGHT 16
+
+//#define PIGMENT_BLOCK_WIDTH 32
+//#define PIGMENT_BLOCK_HEIGHT 32
+//#define PIGMENT_TANK_HEIGHT 32
 
 
 int main(int argc, char* argv[])
@@ -308,7 +341,8 @@ int main(int argc, char* argv[])
     float* s_temp;
     float* z;
     float* evap1;
-    float* evap2;
+    float* gks;
+    float* dks;
 
     cudaMalloc((void**)&cell, height * width * sizeof(unsigned char));
     cudaMalloc((void**)&water_region_flag, height * width * sizeof(unsigned char));
@@ -322,26 +356,37 @@ int main(int argc, char* argv[])
     cudaMalloc((void**)&s_temp, height * width * sizeof(float));
     cudaMalloc((void**)&z, height * width * sizeof(float));
     cudaMalloc((void**)&evap1, height * width * sizeof(float));
-    cudaMalloc((void**)&evap2, height * width * sizeof(float));
+    cudaMalloc((void**)&gks, height * width * sizeof(float) * 5);
+    cudaMalloc((void**)&dks, height * width * sizeof(float) * 5);
     
     cudaMemcpy(z, ((float*)(paper_height_norm.data)), height * width * sizeof(float), cudaMemcpyHostToDevice);
 
     float* s_cpu = new float[height * width];
     float* h_cpu = new float[height * width];
+    float* gk_cpu = new float[height * width * 5];
     unsigned char* cell_cpu = new unsigned char[height * width];
     for(int j = 0; j < height; j++)
     {
         for(int i = 0; i < width; i++)
         {
-            if(powf(j - height / 2, 2) + powf(i - width / 2, 2) <= 800*800)
+            if(powf(j - height / 2, 2) + powf(i - width / 2, 2) <= 600*600)
             {
                 h_cpu[j * width + i] = WATER_H;
                 cell_cpu[j * width + i] = WATER;
+                float thick = PIGMENT_THICK / 5.0;
+                for(int p = 0; p < 5; p++)
+                {
+                    gk_cpu[height * width * p + j * width + i] = thick;
+                }
             }
             else
             {
                 h_cpu[j * width + i] = 0;
                 cell_cpu[j * width + i] = BLOCK;
+                for(int p = 0; p < 5; p++)
+                {
+                    gk_cpu[height * width * p + j * width + i] = 0.0f;
+                }
             }
             s_cpu[j * width + i] = CAP_sigma * 0.6;
         }
@@ -373,6 +418,10 @@ int main(int argc, char* argv[])
 
     dim3 evap_grid_size((width + EVAP_BLOCK_WIDTH - 1) / EVAP_BLOCK_WIDTH, (height + EVAP_BLOCK_HEIGHT - 1) / EVAP_BLOCK_HEIGHT);
     dim3 evap_block_size(EVAP_BLOCK_WIDTH, EVAP_BLOCK_HEIGHT);
+
+    dim3 pigment_grid_size((width - 2 + 30 - 1) / 30, (height - 2 + 30 - 1) / 30);
+    std::cout<<pigment_grid_size.x<<","<<pigment_grid_size.y<<std::endl;
+    dim3 pigment_block_size(32,32);
 
     /*unsigned char* water_region_flag_cpu = new unsigned char[width * height];
     for(int j = 0; j < height; j++)
@@ -431,15 +480,20 @@ int main(int argc, char* argv[])
     Timer::Cumulative_Timer ctime_evap("evaporation");
     Timer::Cumulative_Timer ctime_save("save t-1");
     Timer::Cumulative_Timer ctime_cell("update cells");
+    Timer::Cumulative_Timer ctime_pig("pigment");
 
     int t = 0;
     std::cout<<"simulation start"<<std::endl;
     TIME_BEGIN(simulation);
     while(t < max_time)
     {
-        //BGRu8* debug;
-        //cudaMalloc((void**)&debug, height * width * sizeof(BGRu8));
-        //cudaMemset(debug, 0, height * width * sizeof(BGRu8));
+        /*BGRu8* debug;
+        cudaMalloc((void**)&debug, height * width * sizeof(BGRu8));
+        cudaMemset(debug, 0, height * width * sizeof(BGRu8));
+        int* debug2;
+        cudaMalloc((void**)&debug2, height * width * sizeof(int));
+        cudaMemset(debug2, 0, height * width * sizeof(int));*/
+
         CTIME_BEGIN(ctime_h);
         UpdateH<<<swe_block_num, swe_block_size>>>(
             height,
@@ -525,14 +579,56 @@ int main(int argc, char* argv[])
         );
         CTIME_END(ctime_cell);
 
-        //BGRu8* debug_cpu = new BGRu8[width * height];
-        //cudaMemcpy(debug_cpu, debug, height * width * sizeof(BGRu8), cudaMemcpyDeviceToHost);
-        //cv::Mat debug_mat = cv::Mat(cv::Size(width, height), CV_8UC3, (unsigned char*)debug_cpu);
-        //SAVE("debug", debug_mat);
+        CTIME_BEGIN(ctime_pig);
+        UpdatePigment<<<pigment_grid_size, pigment_block_size>>>(
+            height,
+            width,
+            u_new,
+            v_new,
+            gks,
+            dks,
+            cell,
+            z
+        );
+        CTIME_END(ctime_pig);
+        
+
+        /*BGRu8* debug_cpu = new BGRu8[width * height];
+        cudaMemcpy(debug_cpu, debug, height * width * sizeof(BGRu8), cudaMemcpyDeviceToHost);
+        cv::Mat debug_mat = cv::Mat(cv::Size(width, height), CV_8UC3, (unsigned char*)debug_cpu);
+        SAVE("debug", debug_mat);
+
+        int* debug2_cpu = new int[height * width];
+        cudaMemcpy(debug2_cpu, debug2, height * width * sizeof(int), cudaMemcpyDeviceToHost);
+        cv::Mat debug2_mat = cv::Mat::zeros(cv::Size(width, height), CV_8UC3);
+        for(int j = 0; j < height; j++)
+        {
+            for(int i = 0; i < width; i++)
+            {
+                if(debug2_cpu[j * width + i] == 1)
+                {
+                    debug2_mat.at<cv::Vec3b>(cv::Point(i,j)) = cv::Vec3b(255,0,0);
+                }
+                else if(debug2_cpu[j * width + i] == 2)
+                {
+                    debug2_mat.at<cv::Vec3b>(cv::Point(i,j)) = cv::Vec3b(0,0,255);
+                }
+                else if(debug2_cpu[j * width + i] == 4)
+                {
+                    debug2_mat.at<cv::Vec3b>(cv::Point(i,j)) = cv::Vec3b(0,255,0);
+                }
+                else
+                {
+                    debug2_mat.at<cv::Vec3b>(cv::Point(i,j)) = cv::Vec3b(127,127,127);
+                }
+            }
+        }
+        SAVE("debug2", debug2_mat);*/
 
         t++;
     }
     cudaDeviceSynchronize();
+    CHECK_CUDA_ERR(general);
     TIME_END(simulation);
     std::cout<<"simulation end"<<std::endl;
 
@@ -584,6 +680,7 @@ int main(int argc, char* argv[])
     ctime_evap.show();
     ctime_save.show();
     ctime_cell.show();
+    ctime_pig.show();
 
     cudaFree(h_new);
     cudaFree(h_old);
@@ -595,11 +692,13 @@ int main(int argc, char* argv[])
     cudaFree(s_temp);
     cudaFree(z);
     cudaFree(evap1);
-    cudaFree(evap2);
+    cudaFree(gks);
+    cudaFree(dks);
 
     delete[] h_cpu;
     delete[] s_cpu;
     delete[] cell_cpu;
+    delete[] gk_cpu;
 
     return 0;
 }
@@ -1023,5 +1122,114 @@ __global__ void UpdateCell(
     {
         cell[pixel_idx] = DAMP;
         water_region_flag[pixel_idx] = 0;
+    }
+}
+
+__global__ void UpdatePigment(
+    int height,
+    int width,
+    float* u_new,
+    float* v_new,
+    float* gks,
+    float* dks,
+    unsigned char* cell,
+    float* z
+)
+{
+    __shared__ float gk_temp[32][33];
+    __shared__ float u[32][33];
+    __shared__ float v[33][32];
+
+    int pixel_idx_x = blockIdx.x * 30 + threadIdx.x - 1 + 1;
+    int pixel_idx_y = blockIdx.y * 30 + threadIdx.y - 1 + 1;
+    unsigned char cell_this = BLOCK;
+    float z_this = 0.0f;
+
+    gk_temp[threadIdx.y][threadIdx.x] = 0.0f;
+
+    if(pixel_idx_x >= 0 && pixel_idx_x <= width - 1 && pixel_idx_y >= 0 && pixel_idx_y <= height - 1)
+    {
+        u[threadIdx.y][threadIdx.x] = u_new[pixel_idx_y * (width + 1) + pixel_idx_x];
+        v[threadIdx.y][threadIdx.x] = v_new[pixel_idx_y * width + pixel_idx_x];
+        cell_this = cell[pixel_idx_y * width + pixel_idx_x];
+        z_this = z[pixel_idx_y * width + pixel_idx_x];
+    }
+    else
+    {
+        u[threadIdx.y][threadIdx.x] = 0.0f;
+        v[threadIdx.y][threadIdx.x] = 0.0f;
+    }
+    if(threadIdx.y == 0)
+    {
+        if(blockIdx.x * 30 + 30 + 1 <= width && blockIdx.y * 30 - 1 + threadIdx.x <= height - 1)
+            u[threadIdx.x][32] = u_new[(blockIdx.y * 30 - 1 + threadIdx.x) * (width + 1) + blockIdx.x * 30 + 30 + 1];
+        else
+            u[threadIdx.x][32] = 0.0f;
+    }
+    else if(threadIdx.y == 1)
+    {
+        if(blockIdx.y * 30 + 30 + 1 <= height && blockIdx.x * 30 - 1 + threadIdx.x <= width - 1)
+            v[32][threadIdx.x] = v_new[(blockIdx.y * 30 + 30 + 1) * (width + 1) + blockIdx.x * 30 - 1 + threadIdx.x];
+        else
+            v[32][threadIdx.x] = 0.0f;
+    }
+    __syncthreads();
+
+    for(unsigned char p = 0; p < 5; p++)
+    {
+        // horizontal
+        float* gk = gks + p * height * width;
+        float gk_this = 0.0f;
+        float aa = 0.0f; 
+        float bb = 0.0f; 
+        float cc = 0.0f;
+        float dd = 0.0f; 
+        float sum = 0.0f;
+        float all = 0.0f;
+        if(cell_this == WATER && pixel_idx_x >= 0 && pixel_idx_x <= width - 1 && pixel_idx_y >= 0 && pixel_idx_y <= height - 1)
+        {
+            gk_this = gk[pixel_idx_y * width + pixel_idx_x];
+            aa = MAX(0, gk_this * u[threadIdx.y][threadIdx.x + 1]);
+            bb = MAX(0, -gk_this * u[threadIdx.y][threadIdx.x]);
+            cc = MAX(0, gk_this * v[threadIdx.y + 1][threadIdx.x]);
+            dd = MAX(0, -gk_this * v[threadIdx.y][threadIdx.x]);
+            sum = aa + bb + cc + dd;
+            all = MIN(gk_this, sum);
+        }
+        
+        if(sum > 0)
+        {
+            gk_temp[threadIdx.y][threadIdx.x + 1] += aa / sum * all;
+            gk_temp[threadIdx.y][((threadIdx.x - 1) % 33 + 33) % 33] += bb / sum * all;
+        }
+        __syncthreads();
+        if(sum > 0)
+        {
+            gk_temp[((threadIdx.x + 1) % 32 + 32) % 32][threadIdx.y] += cc / sum * all;
+            gk_temp[((threadIdx.x - 1) % 32 + 32) % 32][threadIdx.y] += dd / sum * all;
+        }
+        __syncthreads();
+        gk_temp[threadIdx.y][threadIdx.x] -= all;
+
+
+        // vertical
+        float* dk = dks + p * height * width;
+        if(pixel_idx_x >= 0 && pixel_idx_x <= width - 1 && pixel_idx_y >= 0 && pixel_idx_y <= height - 1)
+        {
+            if(threadIdx.x != 0 && threadIdx.x != 31 && threadIdx.y != 0 && threadIdx.y != 31)
+            {
+                if(cell_this == WATER)
+                {
+                    float dk_this = dk[pixel_idx_y * width + pixel_idx_x];
+                    float delta_down = gk_temp[threadIdx.y][threadIdx.x] * (1 - z_this * SWE_gamma) * SWE_rou;
+                    float delta_up = dk_this * (1 + (z_this - 1) * SWE_gamma) * SWE_rou / SWE_omega;
+                    dk[pixel_idx_y * width + pixel_idx_x] = dk_this + delta_down - delta_up;
+					gk[pixel_idx_y * width + pixel_idx_x] = gk_temp[threadIdx.y][threadIdx.x] - delta_down + delta_up;
+                }
+            }
+        }
+
+        gk_temp[threadIdx.y][threadIdx.x] = 0.0f;
+        __syncthreads();
     }
 }
