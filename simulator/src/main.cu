@@ -101,14 +101,14 @@ namespace Timer
 #define SWE_f 0.4  //0.075
 #define SWE_g 9.8
 #define SWE_incline_x 0
-#define SWE_incline_y -0.00
+#define SWE_incline_y -0.002
 #define SWE_gamma 0.8
 #define SWE_rou   0.4
 #define SWE_omega 15
 #define dt dt_max
 
-#define SWE_eta_water 0.00  //0.005
-#define SWE_eta_water_const 0.0 //0.1
+#define SWE_eta_water 0.002  //0.005
+#define SWE_eta_water_const 0.1 //0.1
 #define SWE_EVAP_FREE 0.0003
 #define SWE_EVAP_DAMP 0.00000015
 
@@ -369,11 +369,12 @@ int main(int argc, char* argv[])
     float* h_cpu = new float[height * width];
     float* gk_cpu = new float[height * width * 5];
     unsigned char* cell_cpu = new unsigned char[height * width];
+    unsigned char* water_region_flag_cpu = new unsigned char[height * width];
     for(int j = 0; j < height; j++)
     {
         for(int i = 0; i < width; i++)
         {
-            if(powf(j - height / 2, 2) + powf(i - width / 2, 2) <= 600*600)
+            if(powf(j - height / 2, 2) + powf(i - width / 2, 2) <= 200*200)
             {
                 h_cpu[j * width + i] = WATER_H;
                 cell_cpu[j * width + i] = WATER;
@@ -382,6 +383,7 @@ int main(int argc, char* argv[])
                 {
                     gk_cpu[height * width * p + j * width + i] = thick;
                 }
+                water_region_flag_cpu[j * width + i] = 1;
             }
             else
             {
@@ -391,6 +393,7 @@ int main(int argc, char* argv[])
                 {
                     gk_cpu[height * width * p + j * width + i] = 0.0f;
                 }
+                water_region_flag_cpu[j * width + i] = 0;
             }
             s_cpu[j * width + i] = CAP_sigma * 0.6;
         }
@@ -399,6 +402,7 @@ int main(int argc, char* argv[])
     cudaMemcpy(s_temp, s_cpu, height * width * sizeof(float), cudaMemcpyHostToDevice);
     cudaMemcpy(cell, cell_cpu, height * width * sizeof(unsigned char), cudaMemcpyHostToDevice);
     cudaMemcpy(gks, gk_cpu, height * width * sizeof(float) * 5, cudaMemcpyHostToDevice);
+    cudaMemcpy(water_region_flag, water_region_flag_cpu, height * width * sizeof(unsigned char), cudaMemcpyHostToDevice);
     cv::Mat h_mat = cv::Mat::zeros(cv::Size(width, height), CV_8UC1);
     for(int j = 0; j < height; j++)
     {
@@ -423,6 +427,7 @@ int main(int argc, char* argv[])
 
     dim3 evap_grid_size((width + EVAP_BLOCK_WIDTH - 1) / EVAP_BLOCK_WIDTH, (height + EVAP_BLOCK_HEIGHT - 1) / EVAP_BLOCK_HEIGHT);
     dim3 evap_block_size(EVAP_BLOCK_WIDTH, EVAP_BLOCK_HEIGHT);
+    printf("Evap kernel : [%d*%d] [%d*%d]\n", evap_grid_size.x, evap_grid_size.y, EVAP_BLOCK_WIDTH, EVAP_BLOCK_HEIGHT);
 
     dim3 pigment_grid_size((width + 30 - 1) / 30, (height + 30 - 1) / 30);
     std::cout<<pigment_grid_size.x<<","<<pigment_grid_size.y<<std::endl;
@@ -497,7 +502,11 @@ int main(int argc, char* argv[])
         cudaMemset(debug, 0, height * width * sizeof(BGRu8));
         int* debug2;
         cudaMalloc((void**)&debug2, height * width * sizeof(int));
-        cudaMemset(debug2, 0, height * width * sizeof(int));*/
+        cudaMemset(debug2, 0, height * width * sizeof(int));
+        unsigned char* debugu81;
+        cudaMalloc(&debugu81, height * width * sizeof(unsigned char));
+        unsigned char* debugu82;
+        cudaMalloc(&debugu82, height * width * sizeof(unsigned char));*/
 
         CTIME_BEGIN(ctime_h);
         UpdateH<<<swe_block_num, swe_block_size>>>(
@@ -553,6 +562,7 @@ int main(int argc, char* argv[])
             water_region_flag
         );
         CTIME_END(ctime_evap);
+
 
         //cudaMemcpy(h_old, h_new, height * width * sizeof(float), cudaMemcpyDeviceToDevice);
         //cudaMemcpy(u_old, u_new, height * (width + 1) * sizeof(float), cudaMemcpyDeviceToDevice);
@@ -1005,9 +1015,10 @@ __global__ void EvaporateY(
     float* evap
 )
 {
-    __shared__ float evap1[EVAP_BLOCK_WIDTH + 8][EVAP_BLOCK_HEIGHT + 8];
+    __shared__ float evap1[EVAP_BLOCK_HEIGHT + 8][EVAP_BLOCK_WIDTH + 8];
 
     int thread_idx = threadIdx.y * blockDim.x + threadIdx.x;
+    int pixel_idx = (blockIdx.y * blockDim.y + threadIdx.y) * width + blockIdx.x * blockDim.x + threadIdx.x;
     
     
     for(int i = thread_idx; i < (EVAP_BLOCK_WIDTH + 8) * (EVAP_BLOCK_HEIGHT + 8); i += EVAP_BLOCK_WIDTH * EVAP_BLOCK_HEIGHT)
@@ -1023,16 +1034,15 @@ __global__ void EvaporateY(
         }
     }
     __syncthreads();
-    evap[(blockIdx.y * blockDim.y + threadIdx.y) * width + blockIdx.x * blockDim.x + threadIdx.x] = 
-                                            evap1[threadIdx.y + 4 - 4][threadIdx.x + 4] * 0.1109038212717001f +
-                                            evap1[threadIdx.y + 4 - 3][threadIdx.x + 4] * 0.1110591953579631f + 
-                                            evap1[threadIdx.y + 4 - 2][threadIdx.x + 4] * 0.1111703101014332f +
-                                            evap1[threadIdx.y + 4 - 1][threadIdx.x + 4] * 0.1112370323021526f +
-                                            evap1[threadIdx.y + 4    ][threadIdx.x + 4] * 0.1112592819335020f + 
-                                            evap1[threadIdx.y + 4 + 1][threadIdx.x + 4] * 0.1112370323021526f + 
-                                            evap1[threadIdx.y + 4 + 2][threadIdx.x + 4] * 0.1111703101014332f + 
-                                            evap1[threadIdx.y + 4 + 3][threadIdx.x + 4] * 0.1110591953579631f +
-                                            evap1[threadIdx.y + 4 + 4][threadIdx.x + 4] * 0.1109038212717001f;
+    evap[pixel_idx] = evap1[threadIdx.y + 4 - 4][threadIdx.x + 4] * 0.1109038212717001f +
+                      evap1[threadIdx.y + 4 - 3][threadIdx.x + 4] * 0.1110591953579631f + 
+                      evap1[threadIdx.y + 4 - 2][threadIdx.x + 4] * 0.1111703101014332f +
+                      evap1[threadIdx.y + 4 - 1][threadIdx.x + 4] * 0.1112370323021526f +
+                      evap1[threadIdx.y + 4    ][threadIdx.x + 4] * 0.1112592819335020f + 
+                      evap1[threadIdx.y + 4 + 1][threadIdx.x + 4] * 0.1112370323021526f + 
+                      evap1[threadIdx.y + 4 + 2][threadIdx.x + 4] * 0.1111703101014332f + 
+                      evap1[threadIdx.y + 4 + 3][threadIdx.x + 4] * 0.1110591953579631f +
+                      evap1[threadIdx.y + 4 + 4][threadIdx.x + 4] * 0.1109038212717001f;
 }
 
 __global__ void EvaporateXAbsorb(
@@ -1046,10 +1056,12 @@ __global__ void EvaporateXAbsorb(
 	unsigned char* water_region_flag
 )
 {
-    __shared__ float evap1[EVAP_BLOCK_WIDTH + 8][EVAP_BLOCK_HEIGHT + 8];
+    __shared__ float evap1[EVAP_BLOCK_HEIGHT + 8][EVAP_BLOCK_WIDTH + 8];
 
     int pixel_idx = (blockIdx.y * blockDim.y + threadIdx.y) * width + blockIdx.x * blockDim.x + threadIdx.x; 
     int thread_idx = threadIdx.y * blockDim.x + threadIdx.x;
+
+    unsigned char this_cell = cell[pixel_idx];
     
     for(int i = thread_idx; i < (EVAP_BLOCK_WIDTH + 8) * (EVAP_BLOCK_HEIGHT + 8); i += EVAP_BLOCK_WIDTH * EVAP_BLOCK_HEIGHT)
     {
@@ -1073,9 +1085,10 @@ __global__ void EvaporateXAbsorb(
                       evap1[threadIdx.y + 4][threadIdx.x + 4 + 2] * 0.1111703101014332f + 
                       evap1[threadIdx.y + 4][threadIdx.x + 4 + 3] * 0.1110591953579631f +
                       evap1[threadIdx.y + 4][threadIdx.x + 4 + 4] * 0.1109038212717001f;
+
     evap_this = (1 - evap_this) * water_region_flag[pixel_idx];
     evap_this = h_new[pixel_idx] * SWE_eta_water * (evap_this * (1 - SWE_eta_water_const) + SWE_eta_water_const);
-    unsigned char this_cell = cell[pixel_idx];
+    
     if(this_cell == WATER)
     {
         float ds = ABSORB / (evap_this + ABSORB) * MIN(evap_this + ABSORB, h_new[pixel_idx]);
