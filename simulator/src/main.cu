@@ -101,14 +101,14 @@ namespace Timer
 #define SWE_f 0.4  //0.075
 #define SWE_g 9.8
 #define SWE_incline_x 0
-#define SWE_incline_y 0.00
+#define SWE_incline_y -0.00
 #define SWE_gamma 0.8
 #define SWE_rou   0.4
 #define SWE_omega 15
 #define dt dt_max
 
-#define SWE_eta_water 0.005  //0.005
-#define SWE_eta_water_const 0.1 //0.1
+#define SWE_eta_water 0.00  //0.005
+#define SWE_eta_water_const 0.0 //0.1
 #define SWE_EVAP_FREE 0.0003
 #define SWE_EVAP_DAMP 0.00000015
 
@@ -253,6 +253,7 @@ __global__ void UpdatePigment(
     float* u_new,
     float* v_new,
     float* gks,
+    float* gk_temps,
     float* dks,
     unsigned char* cell,
     float* z
@@ -342,6 +343,7 @@ int main(int argc, char* argv[])
     float* z;
     float* evap1;
     float* gks;
+    float* gk_temps;
     float* dks;
 
     cudaMalloc((void**)&cell, height * width * sizeof(unsigned char));
@@ -357,8 +359,10 @@ int main(int argc, char* argv[])
     cudaMalloc((void**)&z, height * width * sizeof(float));
     cudaMalloc((void**)&evap1, height * width * sizeof(float));
     cudaMalloc((void**)&gks, height * width * sizeof(float) * 5);
+    cudaMalloc((void**)&gk_temps, height * width * sizeof(float) * 5);
     cudaMalloc((void**)&dks, height * width * sizeof(float) * 5);
     
+    cudaMemset(gk_temps, 0, height * width * sizeof(float) * 5);
     cudaMemcpy(z, ((float*)(paper_height_norm.data)), height * width * sizeof(float), cudaMemcpyHostToDevice);
 
     float* s_cpu = new float[height * width];
@@ -394,6 +398,7 @@ int main(int argc, char* argv[])
     cudaMemcpy(h_old, h_cpu, height * width * sizeof(float), cudaMemcpyHostToDevice);
     cudaMemcpy(s_temp, s_cpu, height * width * sizeof(float), cudaMemcpyHostToDevice);
     cudaMemcpy(cell, cell_cpu, height * width * sizeof(unsigned char), cudaMemcpyHostToDevice);
+    cudaMemcpy(gks, gk_cpu, height * width * sizeof(float) * 5, cudaMemcpyHostToDevice);
     cv::Mat h_mat = cv::Mat::zeros(cv::Size(width, height), CV_8UC1);
     for(int j = 0; j < height; j++)
     {
@@ -419,7 +424,7 @@ int main(int argc, char* argv[])
     dim3 evap_grid_size((width + EVAP_BLOCK_WIDTH - 1) / EVAP_BLOCK_WIDTH, (height + EVAP_BLOCK_HEIGHT - 1) / EVAP_BLOCK_HEIGHT);
     dim3 evap_block_size(EVAP_BLOCK_WIDTH, EVAP_BLOCK_HEIGHT);
 
-    dim3 pigment_grid_size((width - 2 + 30 - 1) / 30, (height - 2 + 30 - 1) / 30);
+    dim3 pigment_grid_size((width + 30 - 1) / 30, (height + 30 - 1) / 30);
     std::cout<<pigment_grid_size.x<<","<<pigment_grid_size.y<<std::endl;
     dim3 pigment_block_size(32,32);
 
@@ -579,6 +584,34 @@ int main(int argc, char* argv[])
         );
         CTIME_END(ctime_cell);
 
+        /*float* u_temp;
+        cudaMalloc((void**)&u_temp, height * (width + 1) * sizeof(float));
+        float* u_temp_cpu = new float[(width + 1) * height];
+        for(int j = 0; j < height; j++)
+        {
+            for(int i = 0; i < width + 1; i++)
+            {
+                u_temp_cpu[j * (width + 1) + i] = j * (width + 1) + i;
+                if(j == 0 && i == 1)
+                {
+                    printf("u_temp_cpu[j * (width + 1) + i] = %f\n",u_temp_cpu[j * (width + 1) + i]);
+                }
+            }
+        }
+        cudaMemcpy(u_temp, u_temp_cpu, height * (width + 1) * sizeof(float), cudaMemcpyHostToDevice);
+
+        float* v_temp;
+        cudaMalloc((void**)&v_temp, (height + 1) * width * sizeof(float));
+        float* v_temp_cpu = new float[(height + 1) * width];
+        for(int j = 0; j < height + 1; j++)
+        {
+            for(int i = 0; i < width; i++)
+            {
+                v_temp_cpu[j * width + i] = j * width + i;
+            }
+        }
+        cudaMemcpy(v_temp, v_temp_cpu, (height + 1) * width * sizeof(float), cudaMemcpyHostToDevice);*/
+
         CTIME_BEGIN(ctime_pig);
         UpdatePigment<<<pigment_grid_size, pigment_block_size>>>(
             height,
@@ -586,12 +619,14 @@ int main(int argc, char* argv[])
             u_new,
             v_new,
             gks,
+            gk_temps,
             dks,
             cell,
             z
         );
         CTIME_END(ctime_pig);
-        
+        //cudaDeviceSynchronize();
+        cudaMemcpy(gks,gk_temps,height * width * sizeof(float) * 5, cudaMemcpyDeviceToDevice);
 
         /*BGRu8* debug_cpu = new BGRu8[width * height];
         cudaMemcpy(debug_cpu, debug, height * width * sizeof(BGRu8), cudaMemcpyDeviceToHost);
@@ -675,6 +710,21 @@ int main(int argc, char* argv[])
     }
     SAVE("cell_end", cell_end);
 
+    float* dks_cpu = new float[height * width * 5];
+    cudaMemcpy(dks_cpu, dks, height * width * 5 * sizeof(float), cudaMemcpyDeviceToHost);
+    cv::Mat dks_end = cv::Mat::zeros(cv::Size(width, height), CV_8UC1);
+    for(int j = 0; j < height; j++)
+    {
+        for(int i = 0; i < width; i++)
+        {
+            //if(dks_cpu[j * width + i] != 0)
+            //   dks_end.at<unsigned char>(cv::Point(i, j)) = 255;
+            dks_end.at<unsigned char>(cv::Point(i, j)) = dks_cpu[j * width + i] * 255;
+        }
+    }
+    SAVE("dks_end", dks_end);
+    delete[] dks_cpu;
+
     ctime_h.show();
     ctime_uv.show();
     ctime_evap.show();
@@ -693,6 +743,7 @@ int main(int argc, char* argv[])
     cudaFree(z);
     cudaFree(evap1);
     cudaFree(gks);
+    cudaFree(gk_temps);
     cudaFree(dks);
 
     delete[] h_cpu;
@@ -781,12 +832,12 @@ __global__ void UpdateUV(
                 unsigned char c1 = cell[grid_idx_y * width + grid_idx_x];
                 unsigned char c2 = cell[grid_idx_y * width + grid_idx_x - 1];
                 unsigned char c3 = cell[(grid_idx_y - 1) * width + grid_idx_x];
-                unsigned char update_flag = 0x03;  // u,v
+                unsigned char update_flag = 0x03;
                 if(c1 == BLOCK || c1 == DAMP)
                 {
                     u_new[grid_idx_y * (width + 1) + grid_idx_x] = 0;
                     v_new[grid_idx_y * width + grid_idx_x] = 0;
-                    update_flag &= ~0x03;
+                    update_flag = 0;
                 }
                 else
                 {
@@ -1125,18 +1176,20 @@ __global__ void UpdateCell(
     }
 }
 
-__global__ void UpdatePigment(
+/*__global__ void UpdatePigment(
     int height,
     int width,
     float* u_new,
     float* v_new,
     float* gks,
+    float* gk_temps,
     float* dks,
     unsigned char* cell,
     float* z
 )
 {
-    __shared__ float gk_temp[32][33];
+    __shared__ float gk_old[32][33];
+    __shared__ float gk_new[32][33];
     __shared__ float u[32][33];
     __shared__ float v[33][32];
 
@@ -1145,7 +1198,8 @@ __global__ void UpdatePigment(
     unsigned char cell_this = BLOCK;
     float z_this = 0.0f;
 
-    gk_temp[threadIdx.y][threadIdx.x] = 0.0f;
+    gk_old[threadIdx.y][threadIdx.x] = 0.0f;
+    gk_new[threadIdx.y][threadIdx.x] = 0.0f;
 
     if(pixel_idx_x >= 0 && pixel_idx_x <= width - 1 && pixel_idx_y >= 0 && pixel_idx_y <= height - 1)
     {
@@ -1161,25 +1215,30 @@ __global__ void UpdatePigment(
     }
     if(threadIdx.y == 0)
     {
-        if(blockIdx.x * 30 + 30 + 1 <= width && blockIdx.y * 30 - 1 + threadIdx.x <= height - 1)
-            u[threadIdx.x][32] = u_new[(blockIdx.y * 30 - 1 + threadIdx.x) * (width + 1) + blockIdx.x * 30 + 30 + 1];
+        if(blockIdx.x * 30 + 30 + 2 <= width && blockIdx.y * 30 + threadIdx.x <= height - 1)
+            u[threadIdx.x][32] = u_new[(blockIdx.y * 30 + threadIdx.x) * (width + 1) + blockIdx.x * 30 + 32];
         else
             u[threadIdx.x][32] = 0.0f;
     }
     else if(threadIdx.y == 1)
     {
-        if(blockIdx.y * 30 + 30 + 1 <= height && blockIdx.x * 30 - 1 + threadIdx.x <= width - 1)
-            v[32][threadIdx.x] = v_new[(blockIdx.y * 30 + 30 + 1) * (width + 1) + blockIdx.x * 30 - 1 + threadIdx.x];
+        if(blockIdx.y * 30 + 32 <= height && blockIdx.x * 30 + threadIdx.x <= width - 1)
+            v[32][threadIdx.x] = v_new[(blockIdx.y * 30 + 32) * width + blockIdx.x * 30 + threadIdx.x];
         else
             v[32][threadIdx.x] = 0.0f;
     }
     __syncthreads();
 
+    //if(blockIdx.x == 1 && blockIdx.y == 0 && threadIdx.y == 31)
+    //{
+    //    printf("[%d,%d] [%d,%d] %.2f\n", threadIdx.y, threadIdx.x, pixel_idx_y, pixel_idx_x, v[threadIdx.y+1][threadIdx.x]);
+    //}
+
     for(unsigned char p = 0; p < 5; p++)
     {
         // horizontal
         float* gk = gks + p * height * width;
-        float gk_this = 0.0f;
+        float* gk_temp = gk_temps + p * height * width;
         float aa = 0.0f; 
         float bb = 0.0f; 
         float cc = 0.0f;
@@ -1188,48 +1247,189 @@ __global__ void UpdatePigment(
         float all = 0.0f;
         if(cell_this == WATER && pixel_idx_x >= 0 && pixel_idx_x <= width - 1 && pixel_idx_y >= 0 && pixel_idx_y <= height - 1)
         {
-            gk_this = gk[pixel_idx_y * width + pixel_idx_x];
-            aa = MAX(0, gk_this * u[threadIdx.y][threadIdx.x + 1]);
-            bb = MAX(0, -gk_this * u[threadIdx.y][threadIdx.x]);
-            cc = MAX(0, gk_this * v[threadIdx.y + 1][threadIdx.x]);
-            dd = MAX(0, -gk_this * v[threadIdx.y][threadIdx.x]);
-            sum = aa + bb + cc + dd;
-            all = MIN(gk_this, sum);
-        }
-        
-        if(sum > 0)
-        {
-            gk_temp[threadIdx.y][threadIdx.x + 1] += aa / sum * all;
-            gk_temp[threadIdx.y][((threadIdx.x - 1) % 33 + 33) % 33] += bb / sum * all;
+            gk_old[threadIdx.y][threadIdx.x] = gk[pixel_idx_y * width + pixel_idx_x];
+            gk_new[threadIdx.y][threadIdx.x] = gk_old[threadIdx.y][threadIdx.x];
         }
         __syncthreads();
-        if(sum > 0)
-        {
-            gk_temp[((threadIdx.x + 1) % 32 + 32) % 32][threadIdx.y] += cc / sum * all;
-            gk_temp[((threadIdx.x - 1) % 32 + 32) % 32][threadIdx.y] += dd / sum * all;
-        }
-        __syncthreads();
-        gk_temp[threadIdx.y][threadIdx.x] -= all;
 
+        aa = MAX(0, gk_old[threadIdx.x][threadIdx.y] * u[threadIdx.x][threadIdx.y + 1]);
+        bb = MAX(0, -gk_old[threadIdx.x][threadIdx.y] * u[threadIdx.x][threadIdx.y]);
+        cc = MAX(0, gk_old[threadIdx.x][threadIdx.y] * v[threadIdx.x + 1][threadIdx.y]);
+        dd = MAX(0, -gk_old[threadIdx.x][threadIdx.y] * v[threadIdx.x][threadIdx.y]);
+        sum = aa + bb + cc + dd;
+        all = MIN(gk_old[threadIdx.x][threadIdx.y], sum);
+
+        if(sum > 0)
+        {
+            gk_new[((threadIdx.x + 1) % 32 + 32) % 32][threadIdx.y] += cc / sum * all; 
+            gk_new[((threadIdx.x - 1) % 32 + 32) % 32][threadIdx.y] += dd / sum * all; 
+        }
+        __syncthreads();
+
+
+        aa = MAX(0, gk_old[threadIdx.y][threadIdx.x] * u[threadIdx.y][threadIdx.x + 1]);
+        bb = MAX(0, -gk_old[threadIdx.y][threadIdx.x] * u[threadIdx.y][threadIdx.x]);
+        cc = MAX(0, gk_old[threadIdx.y][threadIdx.x] * v[threadIdx.y + 1][threadIdx.x]);
+        dd = MAX(0, -gk_old[threadIdx.y][threadIdx.x] * v[threadIdx.y][threadIdx.x]);
+        sum = aa + bb + cc + dd;
+        all = MIN(gk_old[threadIdx.y][threadIdx.x], sum);
+
+        if(sum > 0)
+        {
+            gk_new[threadIdx.y][threadIdx.x + 1] += aa / sum * all;
+            gk_new[threadIdx.y][((threadIdx.x - 1) % 32 + 32) % 32] += bb / sum * all; //check!
+        }
+        __syncthreads();
+        gk_new[threadIdx.y][threadIdx.x] -= all;
 
         // vertical
         float* dk = dks + p * height * width;
         if(pixel_idx_x >= 0 && pixel_idx_x <= width - 1 && pixel_idx_y >= 0 && pixel_idx_y <= height - 1)
         {
-            if(threadIdx.x != 0 && threadIdx.x != 31 && threadIdx.y != 0 && threadIdx.y != 31)
+            if(threadIdx.x >= 1 && threadIdx.x <= 30 && threadIdx.y >= 1 && threadIdx.y <= 30)
             {
                 if(cell_this == WATER)
                 {
                     float dk_this = dk[pixel_idx_y * width + pixel_idx_x];
-                    float delta_down = gk_temp[threadIdx.y][threadIdx.x] * (1 - z_this * SWE_gamma) * SWE_rou;
+                    float delta_down = gk_new[threadIdx.y][threadIdx.x] * (1 - z_this * SWE_gamma) * SWE_rou;
                     float delta_up = dk_this * (1 + (z_this - 1) * SWE_gamma) * SWE_rou / SWE_omega;
                     dk[pixel_idx_y * width + pixel_idx_x] = dk_this + delta_down - delta_up;
-					gk[pixel_idx_y * width + pixel_idx_x] = gk_temp[threadIdx.y][threadIdx.x] - delta_down + delta_up;
+                    gk_temp[pixel_idx_y * width + pixel_idx_x] = gk_new[threadIdx.y][threadIdx.x] - delta_down + delta_up;
                 }
             }
         }
 
-        gk_temp[threadIdx.y][threadIdx.x] = 0.0f;
+        gk_old[threadIdx.y][threadIdx.x] = 0.0f;
+        gk_new[threadIdx.y][threadIdx.x] = 0.0f;
+    }
+}*/
+
+__global__ void UpdatePigment(
+    int height,
+    int width,
+    float* u_new,
+    float* v_new,
+    float* gks,
+    float* gk_temps,
+    float* dks,
+    unsigned char* cell,
+    float* z
+)
+{
+    __shared__ float gk_old[32][33];
+    __shared__ float gk_new[32][33];
+    __shared__ float u[32][33];
+    __shared__ float v[33][32];
+
+    int pixel_idx_x = blockIdx.x * 30 + threadIdx.x - 1 + 1;
+    int pixel_idx_y = blockIdx.y * 30 + threadIdx.y - 1 + 1;
+    unsigned char cell_this = BLOCK;
+    float z_this = 0.0f;
+
+    gk_old[threadIdx.y][threadIdx.x] = 0.0f;
+    gk_new[threadIdx.y][threadIdx.x] = 0.0f;
+
+    if(pixel_idx_x >= 1 && pixel_idx_x <= width - 2 && pixel_idx_y >= 1 && pixel_idx_y <= height - 2)
+    {
+        u[threadIdx.y][threadIdx.x] = u_new[pixel_idx_y * (width + 1) + pixel_idx_x];
+        v[threadIdx.y][threadIdx.x] = v_new[pixel_idx_y * width + pixel_idx_x];
+        cell_this = cell[pixel_idx_y * width + pixel_idx_x];
+        z_this = z[pixel_idx_y * width + pixel_idx_x];
+    }
+    else
+    {
+        u[threadIdx.y][threadIdx.x] = 0.0f;
+        v[threadIdx.y][threadIdx.x] = 0.0f;
+    }
+    if(threadIdx.y == 0)
+    {
+        if(blockIdx.x * 30 + 30 + 2 <= width - 1 && blockIdx.y * 30 + threadIdx.x <= height - 2)
+            u[threadIdx.x][32] = u_new[(blockIdx.y * 30 + threadIdx.x) * (width + 1) + blockIdx.x * 30 + 32];
+        else
+            u[threadIdx.x][32] = 0.0f;
+    }
+    else if(threadIdx.y == 1)
+    {
+        if(blockIdx.y * 30 + 32 <= height - 1 && blockIdx.x * 30 + threadIdx.x <= width - 2)
+            v[32][threadIdx.x] = v_new[(blockIdx.y * 30 + 32) * width + blockIdx.x * 30 + threadIdx.x];
+        else
+            v[32][threadIdx.x] = 0.0f;
+    }
+    __syncthreads();
+
+    //if(blockIdx.x == 1 && blockIdx.y == 0 && threadIdx.y == 31)
+    //{
+    //    printf("[%d,%d] [%d,%d] %.2f\n", threadIdx.y, threadIdx.x, pixel_idx_y, pixel_idx_x, v[threadIdx.y+1][threadIdx.x]);
+    //}
+
+    for(unsigned char p = 0; p < 5; p++)
+    {
+        // horizontal
+        float* gk = gks + p * height * width;
+        float* gk_temp = gk_temps + p * height * width;
+        float aa = 0.0f; 
+        float bb = 0.0f; 
+        float cc = 0.0f;
+        float dd = 0.0f; 
+        float sum = 0.0f;
+        float all = 0.0f;
+        if(cell_this == WATER && pixel_idx_x >= 1 && pixel_idx_x <= width - 2 && pixel_idx_y >= 1 && pixel_idx_y <= height - 2)
+        {
+            gk_old[threadIdx.y][threadIdx.x] = gk[pixel_idx_y * width + pixel_idx_x];
+            gk_new[threadIdx.y][threadIdx.x] = gk_old[threadIdx.y][threadIdx.x];
+        }
+        __syncthreads();
+
+        aa = MAX(0, gk_old[threadIdx.x][threadIdx.y] * u[threadIdx.x][threadIdx.y + 1]);
+        bb = MAX(0, -gk_old[threadIdx.x][threadIdx.y] * u[threadIdx.x][threadIdx.y]);
+        cc = MAX(0, gk_old[threadIdx.x][threadIdx.y] * v[threadIdx.x + 1][threadIdx.y]);
+        dd = MAX(0, -gk_old[threadIdx.x][threadIdx.y] * v[threadIdx.x][threadIdx.y]);
+        sum = aa + bb + cc + dd;
+        __syncthreads();
+        if(sum > 0)
+        {
+            all = MIN(gk_old[threadIdx.x][threadIdx.y], sum);
+            gk_new[(((short)threadIdx.x + 1) % 32 + 32) % 32][threadIdx.y] += cc / sum * all; 
+            gk_new[(((short)threadIdx.x - 1) % 32 + 32) % 32][threadIdx.y] += dd / sum * all; 
+            gk_new[threadIdx.x][threadIdx.y] -= (cc + dd) / sum * all;
+        }
+        __syncthreads();
+
+        aa = MAX(0, gk_old[threadIdx.y][threadIdx.x] * u[threadIdx.y][threadIdx.x + 1]);
+        bb = MAX(0, -gk_old[threadIdx.y][threadIdx.x] * u[threadIdx.y][threadIdx.x]);
+        cc = MAX(0, gk_old[threadIdx.y][threadIdx.x] * v[threadIdx.y + 1][threadIdx.x]);
+        dd = MAX(0, -gk_old[threadIdx.y][threadIdx.x] * v[threadIdx.y][threadIdx.x]);
+        sum = aa + bb + cc + dd;
+        __syncthreads();
+        if(sum > 0)
+        {
+            all = MIN(gk_old[threadIdx.y][threadIdx.x], sum);
+            gk_new[threadIdx.y][(short)threadIdx.x + 1] += aa / sum * all;
+            gk_new[threadIdx.y][(((short)threadIdx.x - 1) % 32 + 32) % 32] += bb / sum * all; //check!
+            gk_new[threadIdx.y][threadIdx.x] -= (aa + bb) / sum * all;
+        }
+        __syncthreads();
+        
+
+        // vertical
+        float* dk = dks + p * height * width;
+        if(pixel_idx_x >= 1 && pixel_idx_x <= width - 2 && pixel_idx_y >= 1 && pixel_idx_y <= height - 2)
+        {
+            if(threadIdx.x >= 1 && threadIdx.x <= 30 && threadIdx.y >= 1 && threadIdx.y <= 30)
+            {
+                if(cell_this == WATER)
+                {
+                    float dk_this = dk[pixel_idx_y * width + pixel_idx_x];
+                    float delta_down = gk_new[threadIdx.y][threadIdx.x] * (1 - z_this * SWE_gamma) * SWE_rou;
+                    float delta_up = dk_this * (1 + (z_this - 1) * SWE_gamma) * SWE_rou / SWE_omega;
+                    dk[pixel_idx_y * width + pixel_idx_x] = dk_this + delta_down - delta_up;
+                    gk_temp[pixel_idx_y * width + pixel_idx_x] = gk_new[threadIdx.y][threadIdx.x] - delta_down + delta_up;
+                }
+            }
+        }
+
+        gk_old[threadIdx.y][threadIdx.x] = 0.0f;
+        gk_new[threadIdx.y][threadIdx.x] = 0.0f;
         __syncthreads();
     }
 }
